@@ -1,7 +1,8 @@
 import pysrt
-import string, os
+import string, os, csv
 import random, re
 from bisect import bisect
+import moviepy.editor as mpy
 
 TAG_RE = re.compile(r'<[^>]+>')
 
@@ -18,13 +19,16 @@ class Subtitle:
 	def __init__(self, sub, filename):
 		self.timeStart = timeToSeconds(sub.start)
 		self.timeEnd = timeToSeconds(sub.end)
-		self.filename = filename
+
+		base = os.path.basename(filename)
+		self.filename = os.path.splitext(base)[0]
+		
 		self.text = subFormat(sub.text)
 		self.words = self.text.split()
 		self.key = self.words[0]
 
-	def getKey(self):
-		return self.key
+	def getKey(self, order):
+		return " ".join(self.words[0:order])
 
 	def getLastWords(self, order):
 		return " ".join(self.words[-order:])
@@ -33,7 +37,7 @@ class Subtitle:
 			   str(self.timeEnd) + ") \"" + self.text + "\""
 
 def timeToSeconds(timeObj):
-	return timeObj.seconds + 60*(timeObj.minutes) + 60*(timeObj.hours)
+	return timeObj.seconds + 60*(timeObj.minutes) + 3600*(timeObj.hours) + timeObj.milliseconds/1000.0
 
 def weightedChoice(choices):
     values, weights = zip(*choices.items())
@@ -59,7 +63,7 @@ def main():
 		subs = pysrt.open('subs/'+filename)
 		for sub in subs:
 			CurrentSubtitle = Subtitle(sub, filename)
-			key = CurrentSubtitle.getKey()
+			key = CurrentSubtitle.getKey(order)
 			#print "<" + key,
 			#print CurrentSubtitle.getLastWords(order) + ">",
 			#print CurrentSubtitle.text
@@ -80,7 +84,7 @@ def main():
 	markov = {}
 	for CurrentSubtitle in subOrder:
 		if PrevSubtitle != None:
-			firstWord = CurrentSubtitle.getKey()
+			firstWord = CurrentSubtitle.getKey(order)
 			lastWords = PrevSubtitle.getLastWords(order)
 			if lastWords in markov:
 				if firstWord in markov[lastWords]:
@@ -90,19 +94,30 @@ def main():
 			else:
 				markov[lastWords] = {firstWord: 1}
 		PrevSubtitle = CurrentSubtitle
-	
+
 	CurrentSubtitle = subOrder[0]
-	for i in xrange(100):
-		print(CurrentSubtitle)
+	clips = []
+	for i in xrange(20):
+		print CurrentSubtitle
+
+		movieFilename = "movies/" + CurrentSubtitle.filename + ".mp4"
+		clip = mpy.VideoFileClip(movieFilename).subclip(CurrentSubtitle.timeStart,CurrentSubtitle.timeEnd)
+		#clip.write_videofile(str(i) + ".mp4");
+		clips.append(clip)
+
 		lastWords = CurrentSubtitle.getLastWords(order)
 		transitions = markov[lastWords]
 		# get weighted choice
 		nextWord = weightedChoice(transitions)
 		possibleSubtitles = d[nextWord]
 		CurrentSubtitle = randomChoice(possibleSubtitles)
+
 		
-			
-				
+	print "Concatenating clips"
+	final_clip = mpy.concatenate_videoclips(clips)
+	print "Writing final clip"
+	final_clip.write_videofile("final_clip.mp4")
+	
 
 if __name__ == "__main__":
 	main()	
