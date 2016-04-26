@@ -1,11 +1,13 @@
 import pysrt, nltk
-import string, os, csv, random, re, glob, pickle, gc
+import string, os, csv, random, re, glob, pickle, gc, math
 from bisect import bisect
 import moviepy.editor as mpy
 from enum import Enum
 from collections import Counter
 
 TAG_RE = re.compile(r'<[^>]+>')
+PUNC_EXCLUDE = set(string.punctuation)
+__USER_CHOICE = True
 
 def remove_tags(text):
     return TAG_RE.sub('', text)
@@ -57,7 +59,7 @@ class Subtitle:
 
 		return PhraseType.unknown
 
-	def __init__(self, sub, prevSub, filename):
+	def __init__(self, sub, filename):
 		self.timeStart = timeToSeconds(sub.start)
 		self.timeEnd = timeToSeconds(sub.end)
 
@@ -65,9 +67,10 @@ class Subtitle:
 		self.filename = os.path.splitext(base)[0]
 		
 		self.text = subFormat(sub.text)
-		self.textWordsOnly = self.text.strip(string.punctuation)
+		self.textWordsOnly = ''.join(ch for ch in self.text if ch not in PUNC_EXCLUDE)
 		self.split = self.text.split()
 		self.words = self.textWordsOnly.split()
+		self.counter = Counter(self.words)
 		self.phraseType = self.__extractSubtype(self.text)
 
 	def __str__(self):
@@ -75,7 +78,7 @@ class Subtitle:
 			   str(self.timeEnd) + ") \"" + self.text + "\""
 
 	def getWordFrequency(self):
-		return Counter(self.words)
+		return self.counter
 
 
 def timeToSeconds(timeObj):
@@ -113,7 +116,7 @@ def getFilename(filenameBase):
 	else:
 		return ""
 
-def writeClips(selectedSubtitles):
+def writeClips(selectedSubtitles, outputBase):
 	clips = []
 	count = 0
 	superclips = 0
@@ -125,7 +128,7 @@ def writeClips(selectedSubtitles):
 		count += 1
 		if (count == 50):
 			superClip = mpy.concatenate_videoclips(clips, method="compose")
-			superClip.write_videofile("superclip" + str(superclips) + ".mp4")
+			superClip.write_videofile(outputBase + str(superclips) + ".mp4")
 			superClip = None
 			clips = []
 			gc.collect()
@@ -135,28 +138,86 @@ def writeClips(selectedSubtitles):
 	print "Concatenating clips"
 	superClip = mpy.concatenate_videoclips(clips, method="compose")
 	print "Writing final clip"
-	superClip.write_videofile("superclip" + str(superclips) + ".mp4")
+	if (superclips > 0):
+		superClip.write_videofile(outputBase + "_pt_" + str(superclips) + ".mp4")
+	else:
+		superClip.write_videofile(outputBase + ".mp4")
+	superClip = None
+	clips = []
+	gc.collect()
+
+
+def extractAndWriteClips(subtitles, word):
+	selectedSubtitles = []
+	for Subtitle in subtitles:
+		if (Subtitle.getWordFrequency()[word] > 0):
+			selectedSubtitles.append(Subtitle)
+	writeClips(selectedSubtitles, subtitles[0].filename + "_" + word)
 
 def main():
 	movieSubtitles = {} # dictionary of movie to subtitle mappings
 	n = 10
 	if (os.path.isfile('data.pickle')):
+		print "Found pickle file, using instead"
 		with open('data.pickle', 'rb') as f:
-			movieSubtitles = pickle.load(f)
+			(movieSubtitles, movieFrequencies, totalFrequencies) = pickle.load(f)
 	else:
+		print "Parsing movie subtitles"
 		parseSubs(movieSubtitles)
+		# get the global counter for all movies
+		print "Getting global word frequency"
+		totalFrequencies = Counter()
+		movieFrequencies = {}
+		for movie in movieSubtitles:
+			print "Parsing " + str(movie)
+			subtitles = movieSubtitles[movie]
+			currentMovieFrequencies = Counter()
+			for subtitle in subtitles:
+				currentMovieFrequencies += subtitle.getWordFrequency()
+			for word in currentMovieFrequencies:
+				totalFrequencies[word] += 1
+			movieFrequencies[movie] = currentMovieFrequencies
+		print "Pickling movie subtitles"
 		with open('data.pickle', 'wb') as f:
-			pickle.dump(movieSubtitles, f, pickle.HIGHEST_PROTOCOL)
-	print movieSubtitles
-	for movie in movieSubtitles:
-		subtitles = movieSubtitles[movie]
-		frequencies = Counter()
-		for subtitle in subtitles:
-			frequencies += subtitle.getWordFrequency()
-		print "top " + str(n) + "word frequencies for " + subtitles[0].filename
-		print frequencies.most_common(n)
+			pickle.dump((movieSubtitles, movieFrequencies, totalFrequencies), f, pickle.HIGHEST_PROTOCOL)
 
 
+	for movie in movieFrequencies:
+		relativeFrequencies = {}
+		currentMovieFrequencies = movieFrequencies[movie]
+		(maxWord, maxWordFreq) = currentMovieFrequencies.most_common(1)[0]
+		for word in currentMovieFrequencies:
+			currentWordFreq = currentMovieFrequencies[word]
+			tf = 0.5 + 0.5 * (currentWordFreq/(maxWordFreq + 0.0))
+			idf = math.log(1 + (len(movieFrequencies.keys()) / (totalFrequencies[word] + 0.0)))
+			tfidf = tf*idf
+			relativeFrequencies[word] = tfidf
+		counter = Counter(relativeFrequencies)
+		#mostCommonWords, mostCommonWordsTfidf = zip(*counter.most_common(50))
+		# remove all words with 
+		filtered = \
+				filter(\
+				lambda (word, relfreq): currentMovieFrequencies[word] > 10 and\
+				word[0].islower() \
+				, counter.most_common(100))
+		if (len(filtered) == 0):
+			print "No interesting words found"
+			continue
+		mostCommonWords, mostCommonWordsTfidf = zip(*filtered)
+		if __USER_CHOICE:
+			i = 0
+			for choice in mostCommonWords:
+				print "(" + str(i) + ")" + choice + "[" + str(currentMovieFrequencies[choice]) + "]"
+				i += 1
+			i = input("Select a word to use or -1 to skip: ")
+			if (i == -1):
+				continue
+			selectedWord = mostCommonWords[i]
+		else:
+			selectedWord = random.choice(mostCommonWords)
+		print "rendering " + movie + " using the word " + selectedWord + " with frequency of " + str(currentMovieFrequencies[selectedWord])
+		extractAndWriteClips(movieSubtitles[movie], selectedWord)
+		
 
 	'''
 	selectedSubtitles = []
