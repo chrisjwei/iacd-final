@@ -1,8 +1,9 @@
-import pysrt
-import string, os, csv
-import random, re
+import pysrt, nltk
+import string, os, csv, random, re, glob, pickle, gc
 from bisect import bisect
 import moviepy.editor as mpy
+from enum import Enum
+from collections import Counter
 
 TAG_RE = re.compile(r'<[^>]+>')
 
@@ -11,12 +12,52 @@ def remove_tags(text):
 
 def subFormat(txt):
 	return remove_tags(txt).encode('utf-8') \
-			  .translate(None, string.punctuation) \
               .replace('\n', ' ') \
               .lstrip()
 
+class PhraseType(Enum):
+	unknown = -1
+	statement = 0
+	shortQuestion = 1
+	longQuestion = 2
+	response = 3
+	yes = 4
+	no = 5
+	maybe = 6
+
+
 class Subtitle:
-	def __init__(self, sub, filename):
+	def __extractSubtype(self, sentence):
+		# REMOVE THIS MAYBE?
+		return PhraseType.unknown
+
+		try:
+			tokens = nltk.word_tokenize(sentence)
+			tagged = nltk.pos_tag(tokens)
+		except:
+			print "failed on sentence: " + sentence
+			return PhraseType.unknown
+		
+		if (sentence[-1] == '?'):
+			if (len(tokens) < 6):
+				return PhraseType.shortQuestion
+			else:
+				return PhraseType.longQuestion
+		[words, tags] = zip(*tagged)
+		if ('UH' in tags):
+			interjection = words[tags.index('UH')].lower()
+			if (interjection == 'yes' or interjection == 'yeah'):
+				if (len(tokens) < 4):
+					return PhraseType.yes
+				else:
+					return PhraseType.unknown
+			if (interjection == 'no'):
+				return PhraseType.no
+
+
+		return PhraseType.unknown
+
+	def __init__(self, sub, prevSub, filename):
 		self.timeStart = timeToSeconds(sub.start)
 		self.timeEnd = timeToSeconds(sub.end)
 
@@ -24,17 +65,18 @@ class Subtitle:
 		self.filename = os.path.splitext(base)[0]
 		
 		self.text = subFormat(sub.text)
-		self.words = self.text.split()
-		self.key = self.words[0]
+		self.textWordsOnly = self.text.strip(string.punctuation)
+		self.split = self.text.split()
+		self.words = self.textWordsOnly.split()
+		self.phraseType = self.__extractSubtype(self.text)
 
-	def getKey(self, order):
-		return " ".join(self.words[0:order])
-
-	def getLastWords(self, order):
-		return " ".join(self.words[-order:])
 	def __str__(self):
 		return self.filename + " (" + str(self.timeStart) + "," + \
 			   str(self.timeEnd) + ") \"" + self.text + "\""
+
+	def getWordFrequency(self):
+		return Counter(self.words)
+
 
 def timeToSeconds(timeObj):
 	return timeObj.seconds + 60*(timeObj.minutes) + 3600*(timeObj.hours) + timeObj.milliseconds/1000.0
@@ -52,72 +94,84 @@ def weightedChoice(choices):
 
 def randomChoice(choices):
 	return random.choice(choices)
-	
 
-def main():
-	# dictionary of all subtitles, keyed by their first word
-	d = {}
-	order = 2
-	subOrder = []
+def parseSubs(subtitles):
 	for filename in os.listdir("subs"):
+		subtitles[filename] = []
+		print ("Parsing srt file: " + filename)
 		subs = pysrt.open('subs/'+filename)
 		for sub in subs:
+			if (len(sub.text.split()) == 0): continue
 			CurrentSubtitle = Subtitle(sub, filename)
-			key = CurrentSubtitle.getKey(order)
-			#print "<" + key,
-			#print CurrentSubtitle.getLastWords(order) + ">",
-			#print CurrentSubtitle.text
-			# if the current starting word exists in the dictionary,
-			# add an additional subtitle object to the list of already
-			# existing subtitles that start with that word
-			if (key in d):
-				d[key].append(CurrentSubtitle)
-			else:
-				d[key] = [CurrentSubtitle]
-			# record subtitle in order
-			subOrder.append(CurrentSubtitle)
-	
-	# now we want to construct a markov chain based on the last n words
-	# of a subtitle, and the most likely next word it should transition to
-	PrevSubtitle = None
-	# an element in markov "sentence": {"word1": count1, "word2": count2}
-	markov = {}
-	for CurrentSubtitle in subOrder:
-		if PrevSubtitle != None:
-			firstWord = CurrentSubtitle.getKey(order)
-			lastWords = PrevSubtitle.getLastWords(order)
-			if lastWords in markov:
-				if firstWord in markov[lastWords]:
-					markov[lastWords][firstWord] += 1
-				else:
-					markov[lastWords][firstWord] = 1
-			else:
-				markov[lastWords] = {firstWord: 1}
-		PrevSubtitle = CurrentSubtitle
+			subtitles[filename].append(CurrentSubtitle)
 
-	CurrentSubtitle = subOrder[0]
+def getFilename(filenameBase):
+	path = "movies/" + filenameBase + ".*"
+	matches = glob.glob(path)
+	if (len(matches) == 1):
+		return matches[0]
+	else:
+		return ""
+
+def writeClips(selectedSubtitles):
 	clips = []
-	for i in xrange(20):
+	count = 0
+	superclips = 0
+	for CurrentSubtitle in selectedSubtitles:
 		print CurrentSubtitle
-
-		movieFilename = "movies/" + CurrentSubtitle.filename + ".mp4"
+		movieFilename = getFilename(CurrentSubtitle.filename)
 		clip = mpy.VideoFileClip(movieFilename).subclip(CurrentSubtitle.timeStart,CurrentSubtitle.timeEnd)
-		#clip.write_videofile(str(i) + ".mp4");
 		clips.append(clip)
+		count += 1
+		if (count == 50):
+			superClip = mpy.concatenate_videoclips(clips, method="compose")
+			superClip.write_videofile("superclip" + str(superclips) + ".mp4")
+			superClip = None
+			clips = []
+			gc.collect()
+			count = 0
+			superclips += 1
 
-		lastWords = CurrentSubtitle.getLastWords(order)
-		transitions = markov[lastWords]
-		# get weighted choice
-		nextWord = weightedChoice(transitions)
-		possibleSubtitles = d[nextWord]
-		CurrentSubtitle = randomChoice(possibleSubtitles)
-
-		
 	print "Concatenating clips"
-	final_clip = mpy.concatenate_videoclips(clips)
+	superClip = mpy.concatenate_videoclips(clips, method="compose")
 	print "Writing final clip"
-	final_clip.write_videofile("final_clip.mp4")
-	
+	superClip.write_videofile("superclip" + str(superclips) + ".mp4")
+
+def main():
+	movieSubtitles = {} # dictionary of movie to subtitle mappings
+	n = 10
+	if (os.path.isfile('data.pickle')):
+		with open('data.pickle', 'rb') as f:
+			movieSubtitles = pickle.load(f)
+	else:
+		parseSubs(movieSubtitles)
+		with open('data.pickle', 'wb') as f:
+			pickle.dump(movieSubtitles, f, pickle.HIGHEST_PROTOCOL)
+	print movieSubtitles
+	for movie in movieSubtitles:
+		subtitles = movieSubtitles[movie]
+		frequencies = Counter()
+		for subtitle in subtitles:
+			frequencies += subtitle.getWordFrequency()
+		print "top " + str(n) + "word frequencies for " + subtitles[0].filename
+		print frequencies.most_common(n)
+
+
+
+	'''
+	selectedSubtitles = []
+	#questionSubtitles = filter(lambda s: s.phraseType == PhraseType.shortQuestion, subtitles)
+	yesSubtitles = filter(lambda s: s.phraseType == PhraseType.yes, subtitles)
+	#noSubtitles = filter(lambda s: s.phraseType == PhraseType.no, subtitles)
+
+	#for i in xrange(20):
+		#selectedSubtitles.append(random.choice(questionSubtitles))
+		#yes = random.choice(yesSubtitles)
+		#no = random.choice(noSubtitles)
+		#selectedSubtitles.append(random.choice(yesSubtitles))
+	random.shuffle(yesSubtitles)
+	writeClips(yesSubtitles)
+	'''
 
 if __name__ == "__main__":
 	main()	
