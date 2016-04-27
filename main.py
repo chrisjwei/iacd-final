@@ -1,5 +1,5 @@
 import pysrt, nltk
-import string, os, csv, random, re, glob, pickle, gc, math
+import string, os, csv, random, re, glob, pickle, gc, math, subprocess
 from bisect import bisect
 import moviepy.editor as mpy
 from enum import Enum
@@ -7,7 +7,7 @@ from collections import Counter
 
 TAG_RE = re.compile(r'<[^>]+>')
 PUNC_EXCLUDE = set(string.punctuation)
-__USER_CHOICE = True
+__USER_CHOICE = False
 
 def remove_tags(text):
     return TAG_RE.sub('', text)
@@ -116,14 +116,26 @@ def getFilename(filenameBase):
 	else:
 		return ""
 
-def writeClips(selectedSubtitles, outputBase):
+def getForcedAlignClip(Subtitle, movieFilename, selectedWord):
+	original_clip = mpy.VideoFileClip(movieFilename).subclip(Subtitle.timeStart,Subtitle.timeEnd)
+	'''text = Subtitle.textWordsOnly
+	with open("temp/temp.txt", "wb") as textFile:
+		textFile.write(text)
+	original_clip.audio.write_audiofile("temp/temp.wav")
+	subprocess.call(["python","./penn_aligner/align.py", "./temp/temp.wav", "./temp/temp.txt", "./temp/aligned.textgrid"], shell=True)
+	'''
+	return original_clip
+
+
+
+def writeClips(selectedSubtitles, outputBase, selectedWord):
 	clips = []
 	count = 0
 	superclips = 0
 	for CurrentSubtitle in selectedSubtitles:
 		print CurrentSubtitle
 		movieFilename = getFilename(CurrentSubtitle.filename)
-		clip = mpy.VideoFileClip(movieFilename).subclip(CurrentSubtitle.timeStart,CurrentSubtitle.timeEnd)
+		clip = getForcedAlignClip(CurrentSubtitle, movieFilename, selectedWord)
 		clips.append(clip)
 		count += 1
 		if (count == 50):
@@ -152,7 +164,7 @@ def extractAndWriteClips(subtitles, word):
 	for Subtitle in subtitles:
 		if (Subtitle.getWordFrequency()[word] > 0):
 			selectedSubtitles.append(Subtitle)
-	writeClips(selectedSubtitles, subtitles[0].filename + "_" + word)
+	writeClips(selectedSubtitles, subtitles[0].filename + "_" + word, word)
 
 def main():
 	movieSubtitles = {} # dictionary of movie to subtitle mappings
@@ -197,8 +209,7 @@ def main():
 		# remove all words with 
 		filtered = \
 				filter(\
-				lambda (word, relfreq): currentMovieFrequencies[word] > 10 and\
-				word[0].islower() \
+				lambda (word, relfreq): currentMovieFrequencies[word] > 10
 				, counter.most_common(100))
 		if (len(filtered) == 0):
 			print "No interesting words found"
