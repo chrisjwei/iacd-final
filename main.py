@@ -10,7 +10,19 @@ from collections import Counter
 
 TAG_RE = re.compile(r'<[^>]+>')
 PUNC_EXCLUDE = set(string.punctuation)
-__USER_CHOICE = False
+
+# Where to read your movies from
+MOVIE_PATH_BASE_DIR = "movies/"
+# Where to read your subtitles from
+SUB_PATH_BASE_DIR = "subs/"
+# Where to save the output video and SRT file
+OUTPUT_BASE = "final"
+# Which syllables you want to use. If you care about using just 10 syllable
+# Phrases, kindly set this variable to [10]
+SELECTED_NUM_SYLLABLES = xrange(8,13)
+
+# Try reducing this number if its taking too long or you're running out of RAM
+NUM_SEGMENTS_MAX = 24
 
 def remove_tags(text):
     return TAG_RE.sub('', text)
@@ -19,8 +31,6 @@ def subFormat(txt):
 	return remove_tags(txt).encode('ascii', 'ignore') \
               .replace('\n', ' ') \
               .lstrip()
-	
-
 
 class Subtitle:
 	
@@ -107,31 +117,17 @@ class Subtitle:
 				rhymingSubtitles.append(CurrentSubtitle)
 		return rhymingSubtitles				
 
-
-	
-
 def timeToSeconds(timeObj):
 	return timeObj.seconds + 60*(timeObj.minutes) + 3600*(timeObj.hours) + timeObj.milliseconds/1000.0
-
-def weightedChoice(choices):
-    values, weights = zip(*choices.items())
-    total = 0
-    cum_weights = []
-    for w in weights:
-        total += w
-        cum_weights.append(total)
-    x = random.random() * total
-    i = bisect(cum_weights, x)
-    return values[i]
 
 def randomChoice(choices):
 	return random.choice(choices)
 
 def parseSubs(subtitles):
-	for filename in os.listdir("subs"):
+	for filename in os.listdir(SUB_PATH_BASE_DIR):
 		print ("Parsing srt file: " + filename)
 		try:
-			subs = pysrt.open('subs/'+filename)
+			subs = pysrt.open(SUB_PATH_BASE_DIR+filename)
 		except:
 			print "Could not parse "+ filename
 			continue
@@ -139,8 +135,8 @@ def parseSubs(subtitles):
 			sub = subs[i]
 			if i != len(subs)-1:
 				# some subbers are crazy impatient! subs drop out prematurely
-				# given a threshold for about 1.5 seconds, we will extend the sub up to
-				# 750ms based on the start tiem of the next subtitle
+				# given a threshold for about 2 seconds, we will extend the sub up to
+				# 1 second based on the start time of the next subtitle
 				nextSub = subs[i+1]
 				timeToNextSub = nextSub.start - sub.end
 				secondsToNextSub = timeToNextSub.seconds + timeToNextSub.milliseconds/1000.0
@@ -155,7 +151,7 @@ def parseSubs(subtitles):
 			subtitles.append(CurrentSubtitle)
 
 def getFilename(filenameBase):
-	path = "movies/" + filenameBase + ".*"
+	path = MOVIE_PATH_BASE_DIR + filenameBase + ".*"
 	matches = glob.glob(path)
 	if (len(matches) == 1):
 		return matches[0]
@@ -182,6 +178,7 @@ def writeClips(selectedSubtitles, outputBase):
 	superclips = 0
 	volumeFn = lambda array: np.sqrt(((1.0*array)**2).mean())
 	desiredVolume = 0.03
+	desiredHeight = 720
 	# create subtitle file to go along with it
 	newSubs = pysrt.srtfile.SubRipFile()
 	for CurrentSubtitle in selectedSubtitles:
@@ -191,34 +188,33 @@ def writeClips(selectedSubtitles, outputBase):
 		clip = mpy.VideoFileClip(movieFilename).subclip(CurrentSubtitle.timeStart,CurrentSubtitle.timeEnd)
 		volume = volumeFn(clip.audio.to_soundarray())
 		clip.audio = clip.audio.fx(mpy.afx.volumex, desiredVolume/volume)
+		clip = mpyfx.resize(clip, width=clip.w * desiredHeight / clip.h , height=desiredHeight)
 		clips.append(clip)
 		count += 1
-		if (count == 50):
+		if (count == NUM_SEGMENTS_MAX):
 			superClip = mpy.concatenate_videoclips(clips, method="compose")
 			superClip.write_videofile(outputBase + str(superclips) + ".mp4")
 			superClip = None
 			clips = []
+			newSubs.save(outputBase + str(superclips) + ".srt")
 			gc.collect()
 			count = 0
 			superclips += 1
-	
-	# calculate the lowest resolution height
-	minHeight = min(map(lambda clip: clip.h, clips))
-	for (i, clip) in enumerate(clips):
-		clips[i] = mpyfx.resize(clip, width=clip.w * minHeight / clip.h , height=minHeight)
+			newSubs = pysrt.srtfile.SubRipFile()
 
 	print "Concatenating clips"
 	superClip = mpy.concatenate_videoclips(clips, method="compose")
 	print "Writing final clip"
 	if (superclips > 0):
-		superClip.write_videofile(outputBase + "_pt_" + str(superclips) + ".mp4")
+		superClip.write_videofile(outputBase + str(superclips) + ".mp4")
+		newSubs.save(outputBase + str(superclips) + ".srt")
 	else:
 		superClip.write_videofile(outputBase + ".mp4")
+		newSubs.save(outputBase + ".srt")
 	superClip = None
 	clips = []
-	gc.collect()
-	print "Writing srt file"
-	newSubs.save(outputBase + ".srt")
+	newSubs = None
+	gc.collect()	
 
 def main():
 	if os.path.isfile("rhyme.pickle"):
@@ -228,7 +224,7 @@ def main():
 		allSubtitles = []
 		parseSubs(allSubtitles)
 		numSyllableSegmentedSubtitleList = []
-		for i in xrange(8,13):
+		for i in SELECTED_NUM_SYLLABLES:
 			Subtitles = filter(lambda Subtitle: Subtitle.numSyllable == i, allSubtitles)
 			numSyllableSegmentedSubtitleList.append(Subtitles)
 			print ("Found " + str(len(Subtitles)) + " subtitles with " + str(i) + " syllables")
@@ -257,9 +253,7 @@ def main():
 			selectedSubtitles.append(CurrentSubtitle)
 			selectedSubtitles.append(selected)
 	
-	writeClips(selectedSubtitles[0:10], "final")
-
-
+	writeClips(selectedSubtitles, OUTPUT_BASE)
 
 
 if __name__ == "__main__":
