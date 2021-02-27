@@ -23,3 +23,7 @@ Your video files should be in mp4 format and your subtitles should be in SRT for
  - Rhyming and syllable detection using pronuciation rules from `cmudict` shout outs to CMU
  - Standardizes movie height
  - Standardizes loudness of sound clips
+
+### Example
+- https://vimeo.com/164774426
+- https://vimeo.com/165395316
